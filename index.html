@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Car TV">
+<meta name="theme-color" content="#0b0b0f">
+<title>Car TV</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<style>
+:root{--bg:#0b0b0f;--card:#16161d;--text:#f2f2f7;--muted:#8e8e99;--accent:#ff3b30;--r:16px}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+#app{display:flex;flex-direction:column;height:100%;padding-top:env(safe-area-inset-top)}
+header{padding:14px 16px;display:flex;align-items:center;border-bottom:1px solid #1c1c26}
+.logo{font-weight:800;font-size:22px;letter-spacing:-.5px}
+.logo span{color:var(--accent)}
+#search{margin:12px 16px;padding:14px 16px;border-radius:var(--r);background:var(--card);border:none;color:var(--text);font-size:16px;outline:none}
+#search::placeholder{color:var(--muted)}
+main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 16px 40px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.card{background:var(--card);border:none;border-radius:var(--r);overflow:hidden;padding:0;display:flex;flex-direction:column;text-align:left;color:inherit;cursor:pointer}
+.card:active{opacity:.7}
+.card.browser{background:linear-gradient(135deg,#007aff,#5856d6);grid-column:1/-1;padding:22px}
+.thumb{position:relative;width:100%;aspect-ratio:16/9;background:#222;display:flex;align-items:center;justify-content:center;font-size:38px}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.meta{padding:10px 12px}
+.title{font-size:14px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.browser .title{font-size:20px;margin-bottom:4px}
+.browser .sub{font-size:13px;opacity:.92}
+#status{text-align:center;padding:60px 20px;color:var(--muted);font-size:16px;line-height:1.5}
+.spinner{width:36px;height:36px;border:3px solid #2a2a35;border-top-color:var(--accent);border-radius:50%;animation:spin .9s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+#player{position:fixed;inset:0;background:#000;z-index:100;display:none}
+#player.show{display:block}
+#video{width:100%;height:100%;background:#000;object-fit:contain}
+#controls{position:absolute;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 10px) 16px 16px;background:linear-gradient(#000c,#0000);display:flex;gap:12px;align-items:center}
+#controls button{background:rgba(255,255,255,.18);border:none;color:#fff;padding:10px 16px;border-radius:10px;font-size:15px;font-weight:600}
+#controls .now{flex:1;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><div class="logo">Car<span>TV</span></div></header>
+  <input id="search" type="search" placeholder="Filter channels..." autocomplete="off">
+  <main>
+    <div id="status"><div class="spinner"></div>Loading channels...</div>
+    <div id="grid" hidden></div>
+  </main>
+</div>
+<div id="player">
+  <video id="video" controls playsinline></video>
+  <div id="controls">
+    <button id="back">&#8592; Back</button>
+    <div class="now" id="nowPlaying"></div>
+  </div>
+</div>
+<script>
+const M3U_URL = 'channels.m3u';
+const YOUTUBE_URL = 'https://m.youtube.com';
+
+const grid = document.getElementById('grid');
+const statusEl = document.getElementById('status');
+const searchEl = document.getElementById('search');
+const player = document.getElementById('player');
+const video = document.getElementById('video');
+const nowEl = document.getElementById('nowPlaying');
+let channels = [];
+let hls = null;
+
+async function loadChannels(){
+  try{
+    const res = await fetch(M3U_URL,{cache:'no-cache'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    channels = parseM3U(await res.text());
+    render();
+  }catch(e){
+    statusEl.innerHTML = 'Failed to load <code>'+M3U_URL+'</code>: '+e.message+
+      '<br><br>Check that <b>channels.m3u</b> is in the same repo folder.';
+  }
+}
+
+function parseM3U(text){
+  const out=[]; let cur=null;
+  for(const raw of text.split(/\r?\n/)){
+    const t = raw.trim(); if(!t) continue;
+    if(t.startsWith('#EXTINF:')){
+      cur = {
+        name: t.split(',').pop().trim(),
+        logo: (t.match(/tvg-logo="([^"]*)"/)||[])[1] || ''
+      };
+    } else if(!t.startsWith('#') && cur){
+      cur.url = t; out.push(cur); cur = null;
+    }
+  }
+  return out;
+}
+
+function render(){
+  const q = searchEl.value.trim().toLowerCase();
+  const list = q ? channels.filter(c=>c.name.toLowerCase().includes(q)) : channels;
+
+  let html = '<button class="card browser" data-browser="1">'+
+    '<div class="title">Open Browser</div>'+
+    '<div class="sub">YouTube, any site - full search &amp; playback</div>'+
+    '</button>';
+
+  html += list.map(c=>{
+    const thumb = c.logo
+      ? '<img src="'+esc(c.logo)+'" alt="" onerror="this.parentElement.textContent=\'TV\'">'
+      : 'TV';
+    return '<button class="card" data-i="'+channels.indexOf(c)+'">'+
+      '<div class="thumb">'+thumb+'</div>'+
+      '<div class="meta"><div class="title">'+esc(c.name)+'</div></div>'+
+      '</button>';
+  }).join('');
+
+  grid.innerHTML = html;
+  grid.hidden = false;
+  statusEl.hidden = true;
+}
+
+function play(i){
+  const c = channels[i]; if(!c) return;
+  nowEl.textContent = c.name;
+  player.classList.add('show');
+  if(hls){ hls.destroy(); hls = null; }
+  if(video.canPlayType('application/vnd.apple.mpegurl')){
+    video.src = c.url;
+  } else if(window.Hls && Hls.isSupported()){
+    hls = new Hls(); hls.loadSource(c.url); hls.attachMedia(video);
+  } else {
+    video.src = c.url;
+  }
+  video.play().catch(()=>{});
+}
+
+function stop(){
+  player.classList.remove('show');
+  video.pause(); video.removeAttribute('src'); video.load();
+  if(hls){ hls.destroy(); hls = null; }
+}
+
+grid.addEventListener('click', e=>{
+  const card = e.target.closest('.card'); if(!card) return;
+  if(card.dataset.browser){
+    window.open(YOUTUBE_URL, '_blank');
+    return;
+  }
+  const i = Number(card.dataset.i);
+  if(!isNaN(i)) play(i);
+});
+
+searchEl.addEventListener('input', render);
+document.getElementById('back').addEventListener('click', stop);
+
+const esc = s => String(s).replace(/[&<>"']/g, c=>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+loadChannels();
+</script>
+</body>
+</html>
